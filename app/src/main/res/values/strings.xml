@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Voice to Text</string>
+    <string name="transcript_placeholder">Abhi kuch nahi hai. Bolna shuru karein...</string>
+</resources>
