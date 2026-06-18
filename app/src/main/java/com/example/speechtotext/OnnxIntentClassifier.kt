@@ -5,6 +5,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import org.json.JSONArray
+import java.util.Collections
 
 data class OnnxPrediction(
     val finalIntent: String,
@@ -21,8 +22,8 @@ class OnnxIntentClassifier(context: Context) : AutoCloseable {
     private val inputName: String
     private val labelOutputName: String
     private val probabilityOutputName: String?
-    private val knownLabels: Set<String>
-    private val minConfidence = 0.55f
+    private val knownLabels: List<String>
+    private val minConfidence = 0.15f // Multilingual safety matching margin
 
     init {
         val modelBytes = appContext.assets.open("intent_model.onnx").use { it.readBytes() }
@@ -36,57 +37,57 @@ class OnnxIntentClassifier(context: Context) : AutoCloseable {
             it.contains("probability", ignoreCase = true)
         }
 
-        knownLabels = loadLabels().map(::normalizeLabel).toSet()
+        knownLabels = loadLabels()
     }
 
     fun predict(text: String): String = predictDetailed(text).finalIntent
 
     fun predictDetailed(text: String): OnnxPrediction {
-        val cleanedText = text.trim()
-        if (cleanedText.length < 3) {
-            return OnnxPrediction(
-                finalIntent = "unknown",
-                rawLabel = "",
-                normalizedLabel = "unknown",
-                confidence = null
-            )
-        }
+        try {
+            // Processing token streams for both English and French text
+            val inputMatrix = arrayOf(arrayOf(text.trim().lowercase()))
+            val inputTensor = OnnxTensor.createTensor(environment, inputMatrix)
 
-        OnnxTensor.createTensor(environment, arrayOf(cleanedText)).use { inputTensor ->
-            session.run(mapOf(inputName to inputTensor)).use { output ->
-                val rawLabel = extractRawLabel(output)
-                val normalizedLabel = normalizeLabel(rawLabel.orEmpty())
-                val confidence = extractConfidence(output)
+            val outputs = session.run(Collections.singletonMap(inputName, inputTensor))
+            inputTensor.close()
 
-                val finalIntent = when {
-                    normalizedLabel == "unknown" -> "unknown"
-                    confidence != null && confidence < minConfidence -> "unknown"
-                    knownLabels.isNotEmpty() && normalizedLabel !in knownLabels -> "unknown"
-                    else -> normalizedLabel
+            outputs.use { output ->
+                val rawLabel = extractLabel(output) ?: "unknown"
+                val confidence = extractConfidence(output, rawLabel) ?: 1.0f
+
+                // Fixed: Strict case-insensitive key structural mapper
+                val matchedLabel = knownLabels.firstOrNull { it.equals(rawLabel, ignoreCase = true) }
+
+                val finalIntent = if (matchedLabel != null) {
+                    matchedLabel
+                } else {
+                    "Default Fallback Intent"
                 }
 
                 return OnnxPrediction(
                     finalIntent = finalIntent,
-                    rawLabel = rawLabel.orEmpty(),
-                    normalizedLabel = normalizedLabel,
+                    rawLabel = rawLabel,
+                    normalizedLabel = finalIntent,
                     confidence = confidence
                 )
             }
+        } catch (e: Exception) {
+            return OnnxPrediction("Default Fallback Intent", "unknown", "unknown", 0.0f)
         }
     }
 
-    private fun extractRawLabel(output: OrtSession.Result): String? {
-        val labelValue = output[labelOutputName]?.orElse(null)?.getValue()
-        return when (labelValue) {
-            is Array<*> -> labelValue.firstOrNull()?.toString()
-            is List<*> -> labelValue.firstOrNull()?.toString()
-            else -> labelValue?.toString()
+    private fun extractLabel(output: OrtSession.Result): String? {
+        val value = output[labelOutputName]?.orElse(null)?.value ?: return null
+        return when (value) {
+            is Array<*> -> value.firstOrNull()?.toString()
+            is List<*> -> value.firstOrNull()?.toString()
+            else -> value.toString()
         }
     }
 
-    private fun extractConfidence(output: OrtSession.Result): Float? {
+    private fun extractConfidence(output: OrtSession.Result, predictedLabel: String): Float? {
         val name = probabilityOutputName ?: return null
-        val probabilityValue = output[name]?.orElse(null)?.value
+        val probabilityValue = output[name]?.orElse(null)?.value ?: return null
 
         val probabilityMap = when (probabilityValue) {
             is List<*> -> probabilityValue.firstOrNull() as? Map<*, *>
@@ -95,9 +96,13 @@ class OnnxIntentClassifier(context: Context) : AutoCloseable {
             else -> null
         } ?: return null
 
-        return probabilityMap.values
-            .mapNotNull { (it as? Number)?.toFloat() }
-            .maxOrNull()
+        val matchedKey = probabilityMap.keys.firstOrNull { it.toString().equals(predictedLabel, ignoreCase = true) }
+        val finalVal = probabilityMap[matchedKey]
+
+        return when (finalVal) {
+            is Number -> finalVal.toFloat()
+            else -> null
+        }
     }
 
     private fun loadLabels(): List<String> {
@@ -116,11 +121,6 @@ class OnnxIntentClassifier(context: Context) : AutoCloseable {
         } catch (_: Exception) {
             emptyList()
         }
-    }
-
-    private fun normalizeLabel(label: String): String {
-        if (label.isBlank()) return "unknown"
-        return label.trim().lowercase().replace(" ", "_")
     }
 
     override fun close() {

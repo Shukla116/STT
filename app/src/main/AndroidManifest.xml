@@ -4,11 +4,18 @@
 
     <!-- Mic permission - zaruri hai -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <!-- Internet optional - online fallback ke liye -->
     <uses-permission android:name="android.permission.INTERNET" />
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.SET_ALARM" />
         </intent>
     </queries>
     <application
